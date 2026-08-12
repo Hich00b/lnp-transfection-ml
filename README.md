@@ -9,7 +9,7 @@ This pipeline is built around the **AGILE dataset** format: a CSV containing `SM
 ## Repository Structure
 
 ```text
-LNP_PKa/
+lnp-transfection-ml/
 ├── data/
 │   ├── raw/            # Place your AGILE CSV here (SMILES, Transfection)
 │   └── processed/      # Generated features.csv, targets.csv, metadata.csv
@@ -23,7 +23,8 @@ LNP_PKa/
 │   └── colab_runner.ipynb   # Headless Colab entry point
 ├── requirements.txt
 ├── .gitignore
-�└── README.md
+└── README.md
+```
 
 ## Input Data Format
 The pipeline expects a UTF-8 CSV in `data/raw/` containing at least the following columns (the `Transfection` column acts as the regression target):
@@ -39,7 +40,7 @@ The pipeline expects a UTF-8 CSV in `data/raw/` containing at least the followin
 ## Installation
 ```bash
 git clone https://github.com/Hich00b/lnp-transfection-ml.git
-cd LNP_PKa
+cd lnp-transfection-ml/
 pip install -r requirements.txt
 ```
 
