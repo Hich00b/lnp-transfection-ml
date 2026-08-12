@@ -1,0 +1,38 @@
+# Data (never commit raw datasets or generated artifacts)
+data/raw/*.csv
+data/raw/*.tsv
+data/raw/*.xlsx
+data/processed/*
+!data/raw/.gitkeep
+!data/processed/.gitkeep
+
+# Saved models and plots
+models/*.pkl
+models/*.png
+!models/.gitkeep
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.egg-info/
+.eggs/
+build/
+dist/
+*.npy
+
+# Notebooks
+.ipynb_checkpoints/
+
+# Environments
+.venv/
+venv/
+env/
+.env
+
+# OS / IDE
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
