@@ -36,3 +36,5 @@ env/
 Thumbs.db
 .idea/
 .vscode/
+code_fix.md
+models/xgb_transfection.pkl

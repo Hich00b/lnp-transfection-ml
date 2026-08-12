@@ -4,34 +4,13 @@ import pandas as pd
 import numpy as np
 import warnings
 from rdkit import Chem
-from rdkit.Chem import Descriptors, rdFingerprintGenerator
 
 # Suppress XGBoost serialization warnings for a cleaner terminal output
 warnings.filterwarnings("ignore", category=UserWarning, module="xgboost")
 warnings.filterwarnings("ignore", category=UserWarning, module="pickle")
 
-# Modern (non-deprecated) Morgan/ECFP4 generator -- created once and reused.
-MORGAN_GENERATOR = rdFingerprintGenerator.GetMorganGenerator(
-    radius=2, fpSize=2048
-)
-
-def extract_features_from_smiles(smiles_str):
-    """Converts a SMILES string into 2048 Morgan bits + 4 physical descriptors."""
-    mol = Chem.MolFromSmiles(smiles_str)
-    if mol is None:
-        return None
-
-    # 2048 Morgan Fingerprint bits (using modern rdFingerprintGenerator)
-    fp_array = MORGAN_GENERATOR.GetFingerprintAsNumPy(mol).astype(np.uint8)
-
-    # Physical Descriptors
-    mol_wt = Descriptors.MolWt(mol)
-    num_rot = Descriptors.NumRotatableBonds(mol)
-    tpsa = Descriptors.TPSA(mol)
-    logp = Descriptors.MolLogP(mol)
-
-    descriptors = np.array([mol_wt, num_rot, tpsa, logp])
-    return np.concatenate([fp_array, descriptors])
+# Import feature extraction functions from data_processing module
+from data_processing import smiles_to_mol, featurize_mol
 
 def main():
     parser = argparse.ArgumentParser(description="Run transfection predictions using pre-trained model.")
@@ -45,10 +24,23 @@ def main():
     model = joblib.load(args.model)
 
     if args.smiles:
-        feats = extract_features_from_smiles(args.smiles)
-        if feats is None:
+        mol = smiles_to_mol(args.smiles)
+        if mol is None:
             print("Error: Invalid SMILES string provided.")
         else:
+            features_dict = featurize_mol(mol)
+            # Convert dictionary to numpy array in the correct order matching the training data
+            feature_values = [features_dict[key] for key in sorted(features_dict.keys())
+                            if key.startswith('FP_') or key in ['MolWt', 'NumRotatableBonds', 'TPSA', 'MolLogP']]
+            # Ensure we have the right order: descriptors first, then fingerprints sorted by index
+            ordered_features = []
+            # Add descriptors in order
+            for desc in ['MolWt', 'NumRotatableBonds', 'TPSA', 'MolLogP']:
+                ordered_features.append(features_dict[desc])
+            # Add fingerprints in order
+            for i in range(2048):
+                ordered_features.append(features_dict[f'FP_{i}'])
+            feats = np.array(ordered_features, dtype=np.float32)
             prediction = model.predict([feats])[0]
             print(f"\nSMILES: {args.smiles}")
             print(f"Predicted Transfection Efficiency: {prediction:.4f}\n")
@@ -57,13 +49,23 @@ def main():
         df = pd.read_csv(args.input)
         if "SMILES" not in df.columns:
             raise ValueError("Input CSV must contain a 'SMILES' column.")
-        
+
         features_list = []
         valid_indices = []
 
         for idx, sm in enumerate(df["SMILES"]):
-            feats = extract_features_from_smiles(sm)
-            if feats is not None:
+            mol = smiles_to_mol(sm)
+            if mol is not None:
+                features_dict = featurize_mol(mol)
+                # Convert dictionary to numpy array in the correct order matching the training data
+                ordered_features = []
+                # Add descriptors in order
+                for desc in ['MolWt', 'NumRotatableBonds', 'TPSA', 'MolLogP']:
+                    ordered_features.append(features_dict[desc])
+                # Add fingerprints in order
+                for i in range(2048):
+                    ordered_features.append(features_dict[f'FP_{i}'])
+                feats = np.array(ordered_features, dtype=np.float32)
                 features_list.append(feats)
                 valid_indices.append(idx)
 
