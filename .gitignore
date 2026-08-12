@@ -1,5 +1,5 @@
 # Data (never commit raw datasets or generated artifacts)
-data/raw/*.csv
+
 data/raw/*.tsv
 data/raw/*.xlsx
 data/processed/*
