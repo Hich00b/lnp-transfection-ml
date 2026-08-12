@@ -2,8 +2,13 @@ import argparse
 import joblib
 import pandas as pd
 import numpy as np
+import warnings
 from rdkit import Chem
 from rdkit.Chem import Descriptors, rdFingerprintGenerator
+
+# Suppress XGBoost serialization warnings for a cleaner terminal output
+warnings.filterwarnings("ignore", category=UserWarning, module="xgboost")
+warnings.filterwarnings("ignore", category=UserWarning, module="pickle")
 
 # Modern (non-deprecated) Morgan/ECFP4 generator -- created once and reused.
 MORGAN_GENERATOR = rdFingerprintGenerator.GetMorganGenerator(
