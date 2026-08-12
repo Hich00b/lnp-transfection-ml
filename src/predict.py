@@ -3,24 +3,28 @@ import joblib
 import pandas as pd
 import numpy as np
 from rdkit import Chem
-from rdkit.Chem import Descriptors, AllChem
+from rdkit.Chem import Descriptors, rdFingerprintGenerator
+
+# Modern (non-deprecated) Morgan/ECFP4 generator -- created once and reused.
+MORGAN_GENERATOR = rdFingerprintGenerator.GetMorganGenerator(
+    radius=2, fpSize=2048
+)
 
 def extract_features_from_smiles(smiles_str):
     """Converts a SMILES string into 2048 Morgan bits + 4 physical descriptors."""
     mol = Chem.MolFromSmiles(smiles_str)
     if mol is None:
         return None
-    
-    # 2048 Morgan Fingerprint bits
-    fp = AllChem.GetMorganFingerprintAsBitVect(mol, 2, nBits=2048)
-    fp_array = np.array(fp)
-    
+
+    # 2048 Morgan Fingerprint bits (using modern rdFingerprintGenerator)
+    fp_array = MORGAN_GENERATOR.GetFingerprintAsNumPy(mol).astype(np.uint8)
+
     # Physical Descriptors
     mol_wt = Descriptors.MolWt(mol)
     num_rot = Descriptors.NumRotatableBonds(mol)
     tpsa = Descriptors.TPSA(mol)
     logp = Descriptors.MolLogP(mol)
-    
+
     descriptors = np.array([mol_wt, num_rot, tpsa, logp])
     return np.concatenate([fp_array, descriptors])
 
