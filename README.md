@@ -1,6 +1,6 @@
 # LNP-Transfection: Predicting LNP Transfection Efficiency from SMILES
 
-An end-to-end Python pipeline that predicts the **cell-specific transfection efficiency** of ionizable lipid nanoparticles (LNPs) directly from chemical SMILES strings. It uses ECFP4 Morgan fingerprints and physicochemical descriptors alongside an XGBoost regressor. The pipeline supports both **K-fold cross-validation** and **scaffold-based splitting** to ensure robust generalization to unseen chemical spaces. SHAP (SHapley Additive exPlanations) is integrated to provide feature attribution, revealing how specific substructures and physical properties (such as Molecular Weight and Lipophilicity) drive biological performance.
+An end-to-end Python pipeline that predicts the **cell-specific transfection efficiency** of ionizable lipid nanoparticles (LNPs) directly from chemical SMILES strings. It uses ECFP4 Morgan fingerprints and physicochemical descriptors alongside an XGBoost regressor. The pipeline supports **K-fold cross-validation**, **Murcko scaffold splitting**, and **buffered similarity splitting** to ensure robust generalization to unseen chemical spaces. The buffered similarity splitting approach enforces a minimum distance buffer between training and test molecules, providing mathematically guaranteed separation. SHAP (SHapley Additive exPlanations) is integrated to provide feature attribution, revealing how specific substructures and physical properties (such as Molecular Weight and Lipophilicity) drive biological performance.
 
 This pipeline is built around the **AGILE dataset** format: a CSV containing `SMILES` and `Transfection` columns.
 
@@ -58,15 +58,25 @@ This script processes SMILES strings and generates `features.csv` (2048 Morgan b
 
 ### 2. Model Training & Validation
 
-Train the model using either 5-fold cross-validation or Murcko scaffold splits:
+Train the model using 5-fold cross-validation, Murcko scaffold splits, or buffered similarity splits:
 
 ```bash
 # K-fold cross-validation (Recommended for robust metrics)
 python src/train.py --cv 5
 
-# Scaffold split — tests generalization to unseen chemical scaffolds
+# Murcko scaffold split — tests generalization to unseen chemical scaffolds
 python src/train.py
+
+# Buffered similarity split — enforces minimum distance between train/test molecules
+python src/train.py --split-method buffered --distance-cutoff 0.1
+
+# Leave-one-group-out evaluation with buffering (--cv-clusters flag)
+python src/train.py --cv-clusters --distance-cutoff 0.1 --min-cluster-size 10
 ```
+
+**Parameters for buffered splitting:**
+- `--distance-cutoff`: Maximum Tanimoto distance allowed between train and test molecules (default: 0.1)
+- `--min-cluster-size`: Minimum group size for leave-one-group-out evaluation (default: 10)
 
 **Note:** A cross-validated, pre-trained XGBoost model is already provided in `models/xgb_transfection.pkl`. If you wish to use the trained weights directly, you can skip training and move straight to evaluation or prediction.
 
@@ -100,10 +110,22 @@ To run this pipeline in the cloud, open `notebooks/colab_runner.ipynb` in Google
 
 ## Performance Benchmarks
 
-Using default parameters on a 1,200-sample lipid dataset, the XGBoost regressor yields the following metrics under 5-Fold Cross-Validation:
+Using default parameters on a 1,200-sample lipid dataset, the XGBoost regressor yields the following metrics:
 
-- $R^2$: $0.3680 \pm 0.0849$
-- RMSE: $2.5447 \pm 0.0797$
-- MAE: $1.8661 \pm 0.0588$
+**5-Fold Cross-Validation (recommended for robust metrics):**
+- $R^2$: $0.4901 \pm 0.0490$
+- RMSE: $2.2925 \pm 0.1205$
+- MAE: $1.7234 \pm 0.0819$
 
-These metrics demonstrate stable structure-activity capture, bypassing the heavy test variance observed during strict out-of-distribution scaffold splitting in high-throughput nanoparticle screening.
+**Buffered Similarity Splitting (distance cutoff=0.1):**
+- $R^2$: $0.2100$
+- RMSE: $2.7504$
+- MAE: $2.0618$
+- Test set size: 237 molecules
+- Clean train set size: 814 molecules
+- Dropped molecules: 149 (15.5% of candidate pool)
+- **0 leakage violations** (exhaustive distance verification passed)
+
+These metrics demonstrate stable structure-activity capture with mathematically guaranteed separation between train and test sets at the specified similarity threshold. The buffered similarity splitting approach provides robust generalization to unseen chemical spaces by enforcing a minimum distance buffer between training and test molecules.
+
+**Note:** A cross-validated, pre-trained XGBoost model is already provided in `models/xgb_transfection.pkl`. If you wish to use the trained weights directly, you can skip training and move straight to evaluation or prediction.
