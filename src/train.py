@@ -26,7 +26,7 @@ from typing import Optional, Sequence
 import joblib
 import numpy as np
 import pandas as pd
-from rdkit import Chem
+from rdkit import Chem, DataStructs
 from rdkit.Chem.Scaffolds import MurckoScaffold
 from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
 from sklearn.model_selection import train_test_split
@@ -174,7 +174,7 @@ def cluster_split(
     from rdkit.Chem import rdFingerprintGenerator
     from rdkit.ML.Cluster import Butina
 
-    # Generate Morgan fingerprints
+    # Generate Morgan fingerprints as RDKit ExplicitBitVect objects
     logger.info("Computing Morgan fingerprints for clustering (radius=%d, bits=%d)",
                 fp_radius, fp_bits)
     fps = []
@@ -185,34 +185,27 @@ def cluster_split(
         if mol is None:
             logger.warning("Invalid SMILES for clustering: %s", smi)
             continue
-        # Reuse the same generator setup as in data_processing.py
         gen = rdFingerprintGenerator.GetMorganGenerator(radius=fp_radius, fpSize=fp_bits)
-        fp = gen.GetFingerprintAsNumPy(mol)
+        fp = gen.GetFingerprint(mol)  # Returns ExplicitBitVect
         fps.append(fp)
         valid_indices.append(i)
 
     if not fps:
         raise ValueError("No valid molecules for clustering")
 
-    # Compute pairwise Tanimoto distances
+    # Compute pairwise Tanimoto distances in lower-triangular order
     logger.info("Computing pairwise Tanimoto distances for %d molecules", len(fps))
     distance_matrix = []
-    for i in range(len(fps)):
-        for j in range(i+1, len(fps)):
-            # Compute Tanimoto similarity
-            intersection = np.sum(np.bitwise_and(fps[i], fps[j]))
-            union = np.sum(np.bitwise_or(fps[i], fps[j]))
-            if union == 0:
-                tanimoto_sim = 0.0
-            else:
-                tanimoto_sim = intersection / union
-            # Convert to distance
-            distance = 1.0 - tanimoto_sim
-            distance_matrix.append(distance)
+    nfps = len(fps)
+    for i in range(1, nfps):
+        # Compute similarity of fingerprint i with all previous fingerprints 0..i-1
+        sims = DataStructs.BulkTanimotoSimilarity(fps[i], fps[:i])
+        # Convert similarity to distance (1 - similarity) and extend list
+        distance_matrix.extend([1.0 - s for s in sims])
 
     # Perform clustering
     logger.info("Clustering with Butina algorithm (distance cutoff=%.2f)", distance_cutoff)
-    clusters = Butina.ClusterData(distance_matrix, len(fps), distance_cutoff, isDistData=True)
+    clusters = Butina.ClusterData(distance_matrix, nfps, distance_cutoff, isDistData=True)
 
     # Log cluster information
     logger.info("Butina clustering produced %d clusters", len(clusters))
@@ -276,8 +269,9 @@ def leave_one_cluster_out(
     from rdkit import Chem
     from rdkit.Chem import rdFingerprintGenerator
     from rdkit.ML.Cluster import Butina
+    from rdkit import DataStructs
 
-    # Generate Morgan fingerprints (same as in cluster_split)
+    # Generate Morgan fingerprints as RDKit ExplicitBitVect objects
     logger.info("Computing Morgan fingerprints for leave-one-cluster-out (radius=%d, bits=%d)",
                 fp_radius, fp_bits)
     fps = []
@@ -288,30 +282,26 @@ def leave_one_cluster_out(
         if mol is None:
             continue
         gen = rdFingerprintGenerator.GetMorganGenerator(radius=fp_radius, fpSize=fp_bits)
-        fp = gen.GetFingerprintAsNumPy(mol)
+        fp = gen.GetFingerprint(mol)  # Returns ExplicitBitVect
         fps.append(fp)
         valid_indices.append(i)
 
     if not fps:
         raise ValueError("No valid molecules for clustering")
 
-    # Compute pairwise Tanimoto distances
+    # Compute pairwise Tanimoto distances in lower-triangular order
     logger.info("Computing pairwise Tanimoto distances for %d molecules", len(fps))
     distance_matrix = []
-    for i in range(len(fps)):
-        for j in range(i+1, len(fps)):
-            intersection = np.sum(np.bitwise_and(fps[i], fps[j]))
-            union = np.sum(np.bitwise_or(fps[i], fps[j]))
-            if union == 0:
-                tanimoto_sim = 0.0
-            else:
-                tanimoto_sim = intersection / union
-            distance = 1.0 - tanimoto_sim
-            distance_matrix.append(distance)
+    nfps = len(fps)
+    for i in range(1, nfps):
+        # Compute similarity of fingerprint i with all previous fingerprints 0..i-1
+        sims = DataStructs.BulkTanimotoSimilarity(fps[i], fps[:i])
+        # Convert similarity to distance (1 - similarity) and extend list
+        distance_matrix.extend([1.0 - s for s in sims])
 
     # Perform clustering
     logger.info("Clustering with Butina algorithm (distance cutoff=%.2f)", distance_cutoff)
-    clusters = Butina.ClusterData(distance_matrix, len(fps), distance_cutoff, isDistData=True)
+    clusters = Butina.ClusterData(distance_matrix, nfps, distance_cutoff, isDistData=True)
 
     # Filter clusters by minimum size
     clusters_sorted = sorted([c for c in clusters if len(c) >= min_cluster_size], key=len, reverse=True)
