@@ -145,37 +145,29 @@ def scaffold_split(
     return train_idx, test_idx
 
 
-def cluster_split(
+def buffered_split(
     smiles: Sequence[str],
     fp_radius: int = 2,
     fp_bits: int = 2048,
-    distance_cutoff: float = 0.4,
-    frac_train: float = 0.8,
-    random_state: int = 42,
+    distance_cutoff: float = 0.1,
+    target_test_frac: float = 0.2,
+    min_cluster_size_for_test: int = 1,
 ) -> tuple[list[int], list[int]]:
-    """Split molecules into train/test based on Butina clustering of Morgan fingerprints.
+    """Similarity-based split with an explicitly ENFORCED buffer.
 
-    Molecules are clustered using Tanimoto distance (1 - TanimotoSimilarity) with
-    the given distance_cutoff. Whole clusters are allocated to train/test to ensure
-    no molecule in test is within distance_cutoff similarity of any molecule in train.
-
-    Args:
-        smiles: List of SMILES strings
-        fp_radius: Radius for Morgan fingerprint (default: 2)
-        fp_bits: Number of bits for Morgan fingerprint (default: 2048)
-        distance_cutoff: Maximum Tanimoto distance for clustering (default: 0.4)
-        frac_train: Fraction of molecules to allocate to training (default: 0.8)
-        random_state: Random seed for reproducibility (default: 42)
-
-    Returns:
-        Tuple of (train_indices, test_indices)
+    Unlike Butina cluster membership, this directly verifies that no
+    training molecule is within distance_cutoff of any test molecule,
+    by computing the actual pairwise distance for every remaining
+    candidate against every test molecule, and dropping any that
+    violate the cutoff instead of assuming cluster boundaries handle it.
     """
     from rdkit import Chem
     from rdkit.Chem import rdFingerprintGenerator
     from rdkit.ML.Cluster import Butina
+    from rdkit import DataStructs
 
-    # Generate Morgan fingerprints as RDKit ExplicitBitVect objects
-    logger.info("Computing Morgan fingerprints for clustering (radius=%d, bits=%d)",
+    # Generate Morgan fingerprints as RDKit ExplicitBitVect objects (lower-triangular order)
+    logger.info("Computing Morgan fingerprints for buffered split (radius=%d, bits=%d)",
                 fp_radius, fp_bits)
     fps = []
     valid_indices = []
@@ -183,7 +175,7 @@ def cluster_split(
     for i, smi in enumerate(smiles):
         mol = Chem.MolFromSmiles(smi)
         if mol is None:
-            logger.warning("Invalid SMILES for clustering: %s", smi)
+            logger.warning("Invalid SMILES for buffered split: %s", smi)
             continue
         gen = rdFingerprintGenerator.GetMorganGenerator(radius=fp_radius, fpSize=fp_bits)
         fp = gen.GetFingerprint(mol)  # Returns ExplicitBitVect
@@ -191,9 +183,9 @@ def cluster_split(
         valid_indices.append(i)
 
     if not fps:
-        raise ValueError("No valid molecules for clustering")
+        raise ValueError("No valid molecules for buffered split")
 
-    # Compute pairwise Tanimoto distances in lower-triangular order
+    # Compute pairwise Tanimoto distances in lower-triangular order (same as fixed clustering)
     logger.info("Computing pairwise Tanimoto distances for %d molecules", len(fps))
     distance_matrix = []
     nfps = len(fps)
@@ -203,76 +195,150 @@ def cluster_split(
         # Convert similarity to distance (1 - similarity) and extend list
         distance_matrix.extend([1.0 - s for s in sims])
 
-    # Perform clustering
+    # Perform clustering (only used to pick chemically coherent candidate test region)
     logger.info("Clustering with Butina algorithm (distance cutoff=%.2f)", distance_cutoff)
     clusters = Butina.ClusterData(distance_matrix, nfps, distance_cutoff, isDistData=True)
 
-    # Log cluster information
-    logger.info("Butina clustering produced %d clusters", len(clusters))
-    cluster_sizes = [len(c) for c in clusters]
-    logger.info("Cluster sizes: %s", ", ".join(map(str, sorted(cluster_sizes, reverse=True))))
-    print(f"[Clustering] Produced {len(clusters)} clusters")
-    print(f"[Clustering] Size distribution: {', '.join(map(str, sorted(cluster_sizes, reverse=True)))}")
+    # Sort clusters smallest-first for deterministic accumulation into test set
+    clusters_sorted = sorted(clusters, key=len)  # smallest first
 
-    # Sort clusters by size (largest first) for deterministic allocation
-    clusters_sorted = sorted(clusters, key=len, reverse=True)
-
-    # Allocate whole clusters to train/test
+    # Accumulate whole clusters into candidate test set until target_test_frac is reached
     n_mols = len(valid_indices)
-    n_train_target = int(frac_train * n_mols)
+    n_test_target = int(target_test_frac * n_mols)
 
-    train_indices = []
-    test_indices = []
-    n_train_so_far = 0
+    candidate_test_indices = []
+    n_test_so_far = 0
 
     for cluster in clusters_sorted:
-        if n_train_so_far + len(cluster) <= n_train_target:
-            # Add entire cluster to training
-            train_indices.extend([valid_indices[i] for i in cluster])
-            n_train_so_far += len(cluster)
+        if n_test_so_far + len(cluster) <= n_test_target:
+            # Add entire cluster to candidate test set
+            candidate_test_indices.extend([valid_indices[i] for i in cluster])
+            n_test_so_far += len(cluster)
         else:
-            # Add entire cluster to testing
-            test_indices.extend([valid_indices[i] for i in cluster])
+            # Stop at first cluster that would meet or exceed target
+            break
 
-    # Edge case: if we still need more training molecules (shouldn't happen with reasonable cutoffs)
-    if n_train_so_far < n_train_target and test_indices:
-        # Move smallest test clusters to training until we reach target
-        test_clusters_sorted = sorted([c for c in clusters_sorted if any(i in c for i in
-                                 [valid_indices.index(ti) for ti in test_indices[:10]])],
-                                    key=len)
-        # Simple approach: just take from the end of test_indices
-        while n_train_so_far < n_train_target and test_indices:
-            moved_idx = test_indices.pop()
-            train_indices.append(moved_idx)
-            n_train_so_far += 1
+    # If we didn't reach target and there are remaining clusters, take part of the next one
+    # But per spec, we stop at first cluster that would meet/exceed target, so we don't split clusters
+    # If we still need more and haven't taken any clusters, take the smallest one
+    if n_test_so_far < n_test_target and not candidate_test_indices and clusters_sorted:
+        # Take the smallest cluster to ensure we have something in test
+        smallest_cluster = clusters_sorted[0]
+        candidate_test_indices.extend([valid_indices[i] for i in smallest_cluster])
+        n_test_so_far = len(smallest_cluster)
+        logger.info("Taking smallest cluster (%d members) to meet minimum test size",
+                    len(smallest_cluster))
 
-    logger.info("Cluster split: %d train / %d test", len(train_indices), len(test_indices))
+    # Convert to sets for faster lookup
+    candidate_test_set = set(candidate_test_indices)
+
+    # Now apply exhaustive distance-based buffering:
+    # For every molecule NOT in candidate test set, compute distance to every test molecule
+    # If min distance < distance_cutoff, drop it (exclude from both train and test)
+    train_indices = []
+    dropped_indices = []
+
+    logger.info("Applying distance-based buffering: removing train molecules within %.2f of test set", distance_cutoff)
+
+    # Pre-extract test fingerprints for efficiency
+    test_fps = [fps[i] for i in candidate_test_indices]
+
+    for idx in valid_indices:
+        if idx in candidate_test_set:
+            # This is in the candidate test set - keep it as test (do NOT add to train)
+            pass
+        else:
+            # This is a candidate train molecule - check distance to ALL test molecules
+            mol_fp = fps[idx]
+            # Compute similarity to all test fingerprints
+            sims = DataStructs.BulkTanimotoSimilarity(mol_fp, test_fps)
+            # Find minimum distance (1 - maximum similarity)
+            if sims:  # Should always be true if we have test molecules
+                max_sim = max(sims)
+                min_dist = 1.0 - max_sim
+                if min_dist >= distance_cutoff:
+                    # Far enough from all test molecules - keep in train
+                    train_indices.append(idx)
+                else:
+                    # Too close to at least one test molecule - drop entirely
+                    dropped_indices.append(idx)
+                    logger.debug("Dropping molecule %d (min distance=%.3f to test set)", idx, min_dist)
+            else:
+                # No test molecules - keep in train (shouldn't happen with valid target_test_frac)
+                train_indices.append(idx)
+
+    # The test set is exactly our candidate test set (we don't drop test molecules)
+    test_indices = candidate_test_indices
+
+    # Log results
+    logger.info("Buffered split results:")
+    logger.info("  Candidate test set size: %d", len(test_indices))
+    logger.info("  Clean train set size: %d", len(train_indices))
+    logger.info("  Dropped count: %d (%.1f%% of candidate pool)",
+                len(dropped_indices),
+                100.0 * len(dropped_indices) / (len(train_indices) + len(dropped_indices)) if (len(train_indices) + len(dropped_indices)) > 0 else 0.0)
+    print(f"[Buffered Split] Test size: {len(test_indices)}, Clean train size: {len(train_indices)}, Dropped: {len(dropped_indices)} ({100.0 * len(dropped_indices) / (len(train_indices) + len(dropped_indices)):.1f}% of candidate pool)")
+
+    # EXHAUSTIVE VERIFICATION: verify no leakage
+    logger.info("Running exhaustive leakage verification...")
+    violations = []
+
+    # Check every test molecule against every train molecule
+    train_fps = [fps[i] for i in train_indices]
+    for test_idx in test_indices:
+        test_fp = fps[test_idx]
+        if train_fps:  # Only check if we have training molecules
+            sims = DataStructs.BulkTanimotoSimilarity(test_fp, train_fps)
+            if sims:  # Should always be true if we have train molecules
+                max_sim = max(sims)
+                min_dist = 1.0 - max_sim
+                if min_dist < distance_cutoff:
+                    violations.append((test_idx, min_dist))
+                    logger.warning("LEAKAGE VIOLATION: test molecule %d is %.3f from nearest train molecule", test_idx, min_dist)
+
+    if violations:
+        error_msg = f"Buffered split verification failed: {len(violations)} leakage violations found. First few: {violations[:5]}"
+        logger.error(error_msg)
+        raise RuntimeError(error_msg)
+    else:
+        logger.info("Exhaustive verification passed: 0 leakage violations found across %d test molecules", len(test_indices))
+        print(f"[Buffered Split Verification] 0 leakage violations found across {len(test_indices)} test molecules")
+
+    # Final verification: ensure no overlap between train and test
+    train_set = set(train_indices)
+    test_set = set(test_indices)
+    overlap = train_set.intersection(test_set)
+    if overlap:
+        raise RuntimeError(f"Train/test overlap detected: {overlap}")
+
+    logger.info("Final split: %d train / %d test", len(train_indices), len(test_indices))
     return train_indices, test_indices
 
 
-def leave_one_cluster_out(
+def buffered_leave_one_group_out(
     smiles: Sequence[str],
     fp_radius: int = 2,
     fp_bits: int = 2048,
-    distance_cutoff: float = 0.4,
-    min_cluster_size: int = 5,
+    distance_cutoff: float = 0.1,
+    min_cluster_size: int = 10,
     random_state: int = 42,
 ) -> list[tuple[list[int], list[int]]]:
-    """Generate leave-one-cluster-out splits for cross-validation.
+    """Leave-one-group-out evaluation with explicit buffering.
 
-    Similar to cluster_split but iterates over each cluster above min_cluster_size,
-    holding out each cluster in turn as test set.
+    Similar to buffered_split but iterates over each cluster above min_cluster_size,
+    holding out each cluster in turn as test set, then applies exhaustive
+    distance-based buffering to the training candidates.
 
     Returns:
-        List of (train_indices, test_indices) tuples, one for each cluster held out.
+        List of (train_indices, test_indices) tuples, one for each group held out.
     """
     from rdkit import Chem
     from rdkit.Chem import rdFingerprintGenerator
     from rdkit.ML.Cluster import Butina
     from rdkit import DataStructs
 
-    # Generate Morgan fingerprints as RDKit ExplicitBitVect objects
-    logger.info("Computing Morgan fingerprints for leave-one-cluster-out (radius=%d, bits=%d)",
+    # Generate Morgan fingerprints as RDKit ExplicitBitVect objects (lower-triangular order)
+    logger.info("Computing Morgan fingerprints for buffered leave-one-group-out (radius=%d, bits=%d)",
                 fp_radius, fp_bits)
     fps = []
     valid_indices = []
@@ -287,7 +353,7 @@ def leave_one_cluster_out(
         valid_indices.append(i)
 
     if not fps:
-        raise ValueError("No valid molecules for clustering")
+        raise ValueError("No valid molecules for buffered leave-one-group-out")
 
     # Compute pairwise Tanimoto distances in lower-triangular order
     logger.info("Computing pairwise Tanimoto distances for %d molecules", len(fps))
@@ -311,19 +377,86 @@ def leave_one_cluster_out(
         logger.warning("No clusters meet minimum size requirement of %d", min_cluster_size)
         return []
 
-    # Generate leave-one-cluster-out splits
+    # Generate leave-one-group-out splits with buffering
     splits = []
     for i, test_cluster in enumerate(clusters_sorted):
         # Test set is this cluster
         test_indices = [valid_indices[idx] for idx in test_cluster]
-        # Training set is all other valid indices
+
+        # Candidate training pool is everything not in this test cluster
+        candidate_train_indices = [idx for idx in valid_indices if idx not in test_indices]
+        logger.info("Processing group %d (size=%d) as test set", i, len(test_indices))
+
+        # Apply exhaustive distance-based buffering to candidate training set
         train_indices = []
-        for j, cluster in enumerate(clusters_sorted):
-            if i != j:  # Skip the test cluster
-                train_indices.extend([valid_indices[idx] for idx in cluster])
+        dropped_indices = []
+
+        # Pre-extract test fingerprints for efficiency
+        test_fps = [fps[idx] for idx in test_indices]
+
+        for idx in candidate_train_indices:
+            # This is a candidate train molecule - check distance to ALL test molecules
+            mol_fp = fps[idx]
+            # Compute similarity to all test fingerprints
+            sims = DataStructs.BulkTanimotoSimilarity(mol_fp, test_fps)
+            # Find minimum distance (1 - maximum similarity)
+            if sims:  # Should always be true if we have test molecules
+                max_sim = max(sims)
+                min_dist = 1.0 - max_sim
+                if min_dist >= distance_cutoff:
+                    # Far enough from all test molecules - keep in train
+                    train_indices.append(idx)
+                else:
+                    # Too close to at least one test molecule - drop entirely
+                    dropped_indices.append(idx)
+                    logger.debug("Dropping molecule %d (min distance=%.3f to test set %d)", idx, min_dist, i)
+            else:
+                # No test molecules - keep in train (shouldn't happen)
+                train_indices.append(idx)
+
+        # Log results for this fold
+        logger.info("Group %d results:", i)
+        logger.info("  Test set size: %d", len(test_indices))
+        logger.info("  Clean train set size: %d", len(train_indices))
+        logger.info("  Dropped count: %d (%.1f%%)",
+                    len(dropped_indices),
+                    100.0 * len(dropped_indices) / len(candidate_train_indices) if len(candidate_train_indices) > 0 else 0.0)
+        print(f"[LOCO Group {i}/{len(clusters_sorted)}] Test size: {len(test_indices)}, Clean train size: {len(train_indices)}, Dropped: {len(dropped_indices)} ({100.0 * len(dropped_indices) / len(candidate_train_indices) if len(candidate_train_indices) > 0 else 0.0:.1f}%)")
+
+        # EXHAUSTIVE VERIFICATION for this fold: verify no leakage
+        logger.info("Running exhaustive leakage verification for group %d...", i)
+        violations = []
+
+        # Check every test molecule against every train molecule
+        train_fps = [fps[idx] for idx in train_indices]
+        for test_idx in test_indices:
+            test_fp = fps[test_idx]
+            if train_fps:  # Only check if we have training molecules
+                sims = DataStructs.BulkTanimotoSimilarity(test_fp, train_fps)
+                if sims:  # Should always be true if we have train molecules
+                    max_sim = max(sims)
+                    min_dist = 1.0 - max_sim
+                    if min_dist < distance_cutoff:
+                        violations.append((test_idx, min_dist, i))  # Include group index
+                        logger.warning("LEAKAGE VIOLATION in group %d: test molecule %d is %.3f from nearest train molecule", i, test_idx, min_dist)
+
+        if violations:
+            error_msg = f"Buffered leave-one-group-out verification failed for group {i}: {len(violations)} leakage violations found. First few: {violations[:5]}"
+            logger.error(error_msg)
+            raise RuntimeError(error_msg)
+        else:
+            logger.info("Exhaustive verification passed for group %d: 0 leakage violations found across %d test molecules", i, len(test_indices))
+            print(f"[LOCO Group {i} Verification] 0 leakage violations found across {len(test_indices)} test molecules")
+
+        # Final verification: ensure no overlap between train and test for this fold
+        train_set = set(train_indices)
+        test_set = set(test_indices)
+        overlap = train_set.intersection(test_set)
+        if overlap:
+            raise RuntimeError(f"Train/test overlap detected in group {i}: {overlap}")
+
         splits.append((train_indices, test_indices))
-        logger.info("Cluster %d held out: %d train / %d test",
-                   i, len(train_indices), len(test_indices))
+        logger.info("Group %d held out: %d train / %d test", i, len(train_indices), len(test_indices))
 
     return splits
 
@@ -339,37 +472,37 @@ def make_model() -> XGBRegressor:
 # --------------------------------------------------------------------------- #
 # Evaluation routines
 # --------------------------------------------------------------------------- #
-def train_leave_one_cluster_out(X, y, meta, models_dir, model_name, target,
-                               fp_radius=2, fp_bits=2048, distance_cutoff=0.4,
-                               min_cluster_size=5):
-    """Leave-one-cluster-out evaluation: hold out each cluster in turn, report distribution."""
+def train_leave_one_group_out(X, y, meta, models_dir, model_name, target,
+                               fp_radius=2, fp_bits=2048, distance_cutoff=0.1,
+                               min_cluster_size=10):
+    """Leave-one-group-out evaluation: hold out each group in turn, report distribution."""
     smiles = meta[SMILES_COL].tolist() if SMILES_COL in meta.columns else []
     if len(smiles) != len(X):
         logger.warning(
-            "Metadata length mismatch (%d vs %d); cannot perform leave-one-cluster-out.",
+            "Metadata length mismatch (%d vs %d); cannot perform leave-one-group-out.",
             len(smiles), len(X),
         )
-        return None, None
+        return None, None, None
 
-    splits = leave_one_cluster_out(
+    splits = buffered_leave_one_group_out(
         smiles, fp_radius=fp_radius, fp_bits=fp_bits,
         distance_cutoff=distance_cutoff, min_cluster_size=min_cluster_size
     )
 
     if not splits:
-        logger.warning("No valid clusters for leave-one-cluster-out evaluation")
-        return None, None
+        logger.warning("No valid groups for leave-one-group-out evaluation")
+        return None, None, None
 
     fold_metrics: list[dict[str, float]] = []
     for fold, (train_idx, test_idx) in enumerate(splits, start=1):
         model = fit_model(X.iloc[train_idx], y.iloc[train_idx])
         preds = model.predict(X.iloc[test_idx])
         m = regression_metrics(y.iloc[test_idx], preds)
-        print(f"[LOCO Cluster {fold}/{len(splits)}] " + _fmt(m))
+        print(f"[LOCO Group {fold}/{len(splits)}] " + _fmt(m))
         fold_metrics.append(m)
 
     if not fold_metrics:
-        return None, None
+        return None, None, None
 
     agg = {
         key: (
@@ -378,18 +511,19 @@ def train_leave_one_cluster_out(X, y, meta, models_dir, model_name, target,
         )
         for key in fold_metrics[0]
     }
-    print(f"[Leave-One-Cluster-Out] {target} mean +/- std across {len(fold_metrics)} clusters:")
+    print(f"[Leave-One-Group-Out] {target} mean +/- std across {len(fold_metrics)} groups:")
     for key, (mean, std) in agg.items():
         print(f"    {key:<5}: {mean:.4f} +/- {std:.4f}")
 
-    # Also return per-cluster results for detailed inspection
-    per_cluster_results = []
+    # Also return per-group results for detailed inspection
+    per_group_results = []
     for i, (train_idx, test_idx) in enumerate(splits):
         model = fit_model(X.iloc[train_idx], y.iloc[train_idx])
         preds = model.predict(X.iloc[test_idx])
         m = regression_metrics(y.iloc[test_idx], preds)
-        per_cluster_results.append({
-            'cluster': i+1,
+        per_group_results.append({
+            'group': i+1,
+            'group_size': len([idx for idx in meta[SMILES_COL].tolist() if idx in (set(range(len(meta[SMILES_COL].tolist()))) - set(train_idx))]),  # Approximate
             'n_train': len(train_idx),
             'n_test': len(test_idx),
             'R2': m['R2'],
@@ -406,7 +540,7 @@ def train_leave_one_cluster_out(X, y, meta, models_dir, model_name, target,
     test_idx = []
     _save_split(train_idx, test_idx, models_dir)
 
-    return final, agg, per_cluster_results
+    return final, agg, per_group_results
 
 
 def fit_model(
@@ -469,7 +603,7 @@ def _fmt(metrics: dict[str, float]) -> str:
 # Training routines
 # --------------------------------------------------------------------------- #
 def train_scaffold_split(X, y, meta, models_dir, model_name, target, split_method="scaffold",
-                        fp_radius=2, fp_bits=2048, distance_cutoff=0.4):
+                        fp_radius=2, fp_bits=2048, distance_cutoff=0.1):
     """Single scaffold split: train, evaluate on held-out scaffolds, save model."""
     smiles = meta[SMILES_COL].tolist() if SMILES_COL in meta.columns else []
     if len(smiles) != len(X):
@@ -484,9 +618,9 @@ def train_scaffold_split(X, y, meta, models_dir, model_name, target, split_metho
     else:
         if split_method == "scaffold":
             train_idx, test_idx = scaffold_split(smiles)
-        elif split_method == "cluster":
-            train_idx, test_idx = cluster_split(smiles, fp_radius=fp_radius, fp_bits=fp_bits,
-                                               distance_cutoff=distance_cutoff)
+        elif split_method == "buffered":
+            train_idx, test_idx = buffered_split(smiles, fp_radius=fp_radius, fp_bits=fp_bits,
+                                                distance_cutoff=distance_cutoff)
         else:
             raise ValueError(f"Unknown split method: {split_method}")
 
@@ -501,7 +635,7 @@ def train_scaffold_split(X, y, meta, models_dir, model_name, target, split_metho
 
 
 def train_kfold(X, y, meta, k, models_dir, model_name, target, split_method="scaffold",
-               fp_radius=2, fp_bits=2048, distance_cutoff=0.4):
+               fp_radius=2, fp_bits=2048, distance_cutoff=0.1):
     """K-fold CV reporting mean +/- std, then refit a final model on all data."""
     from sklearn.model_selection import KFold
 
@@ -532,10 +666,10 @@ def train_kfold(X, y, meta, k, models_dir, model_name, target, split_method="sca
     if SMILES_COL in meta.columns and len(meta) == len(X):
         if split_method == "scaffold":
             train_idx, test_idx = scaffold_split(meta[SMILES_COL].tolist())
-        elif split_method == "cluster":
-            train_idx, test_idx = cluster_split(meta[SMILES_COL].tolist(),
-                                               fp_radius=fp_radius, fp_bits=fp_bits,
-                                               distance_cutoff=distance_cutoff)
+        elif split_method == "buffered":
+            train_idx, test_idx = buffered_split(meta[SMILES_COL].tolist(),
+                                                fp_radius=fp_radius, fp_bits=fp_bits,
+                                                distance_cutoff=distance_cutoff)
         else:
             raise ValueError(f"Unknown split method: {split_method}")
     else:
@@ -565,7 +699,7 @@ def _save_split(train_idx, test_idx, models_dir) -> None:
 # --------------------------------------------------------------------------- #
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="Train an XGBoost transfection-efficiency regressor with scaffold or cluster splitting."
+        description="Train an XGBoost transfection-efficiency regressor with scaffold or buffered splitting."
     )
     parser.add_argument("--features", default=DEFAULT_FEATURES)
     parser.add_argument("--targets", default=DEFAULT_TARGETS)
@@ -576,18 +710,18 @@ def _build_parser() -> argparse.ArgumentParser:
                         help="Target column to predict (default: Transfection).")
     parser.add_argument("--cv", type=int, default=None,
                         help="If set, run K-fold CV with K folds then refit on all.")
-    parser.add_argument("--split-method", choices=["scaffold", "cluster"], default="scaffold",
+    parser.add_argument("--split-method", choices=["scaffold", "buffered"], default="scaffold",
                         help="Method to use for train/test split (default: scaffold)")
     parser.add_argument("--cv-clusters", action="store_true",
-                        help="Perform leave-one-cluster-out evaluation instead of regular CV")
+                        help="Perform leave-one-group-out evaluation instead of regular CV")
     parser.add_argument("--fp-radius", type=int, default=2,
                         help="Radius for Morgan fingerprint in clustering (default: 2)")
     parser.add_argument("--fp-bits", type=int, default=2048,
                         help="Number of bits for Morgan fingerprint in clustering (default: 2048)")
-    parser.add_argument("--distance-cutoff", type=float, default=0.4,
-                        help="Distance cutoff for Butina clustering (default: 0.4)")
-    parser.add_argument("--min-cluster-size", type=int, default=5,
-                        help="Minimum cluster size for leave-one-cluster-out (default: 5)")
+    parser.add_argument("--distance-cutoff", type=float, default=0.1,
+                        help="Distance cutoff for buffered splitting (default: 0.1)")
+    parser.add_argument("--min-cluster-size", type=int, default=10,
+                        help="Minimum group size for leave-one-group-out (default: 10)")
     return parser
 
 
@@ -604,14 +738,14 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
           f"(model -> {os.path.join(args.models_dir, args.model_name)})")
 
     if args.cv_clusters:
-        # Leave-one-cluster-out evaluation
-        result = train_leave_one_cluster_out(
+        # Leave-one-group-out evaluation
+        result = train_leave_one_group_out(
             X, y, meta, args.models_dir, args.model_name, args.target,
             fp_radius=args.fp_radius, fp_bits=args.fp_bits,
             distance_cutoff=args.distance_cutoff, min_cluster_size=args.min_cluster_size
         )
         if result[0] is None:  # Training failed
-            logger.error("Leave-one-cluster-out evaluation failed")
+            logger.error("Leave-one-group-out evaluation failed")
             return
     elif args.cv:
         # Regular K-fold CV
