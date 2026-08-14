@@ -494,6 +494,10 @@ def train_leave_one_group_out(X, y, meta, models_dir, model_name, target,
         return None, None, None
 
     fold_metrics: list[dict[str, float]] = []
+    # For pooled metrics: collect all out-of-fold predictions and true values
+    all_oof_preds = []
+    all_oof_true = []
+
     for fold, (train_idx, test_idx) in enumerate(splits, start=1):
         model = fit_model(X.iloc[train_idx], y.iloc[train_idx])
         preds = model.predict(X.iloc[test_idx])
@@ -501,9 +505,17 @@ def train_leave_one_group_out(X, y, meta, models_dir, model_name, target,
         print(f"[LOCO Group {fold}/{len(splits)}] " + _fmt(m))
         fold_metrics.append(m)
 
+        # Collect out-of-fold predictions for pooled metrics
+        all_oof_preds.extend(preds)
+        all_oof_true.extend(y.iloc[test_idx])
+
     if not fold_metrics:
         return None, None, None
 
+    # Compute pooled metrics (PRIMARY)
+    pooled_metrics = regression_metrics(all_oof_true, all_oof_preds)
+
+    # Compute per-fold mean +/- std (SECONDARY)
     agg = {
         key: (
             float(np.mean([m[key] for m in fold_metrics])),
@@ -511,7 +523,10 @@ def train_leave_one_group_out(X, y, meta, models_dir, model_name, target,
         )
         for key in fold_metrics[0]
     }
-    print(f"[Leave-One-Group-Out] {target} mean +/- std across {len(fold_metrics)} groups:")
+
+    # Print both pooled (primary) and per-fold mean +/- std (secondary)
+    print(f"[Leave-One-Group-Out] {target} POOLED METRICS (PRIMARY): " + _fmt(pooled_metrics))
+    print(f"[Leave-One-Group-Out] {target} mean +/- std across {len(fold_metrics)} groups (SECONDARY, unstable for small groups):")
     for key, (mean, std) in agg.items():
         print(f"    {key:<5}: {mean:.4f} +/- {std:.4f}")
 
@@ -540,7 +555,8 @@ def train_leave_one_group_out(X, y, meta, models_dir, model_name, target,
     test_idx = []
     _save_split(train_idx, test_idx, models_dir)
 
-    return final, agg, per_group_results
+    # Return both pooled metrics (as primary agg) and per-group results
+    return final, pooled_metrics, per_group_results
 
 
 def fit_model(
@@ -747,6 +763,27 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
         if result[0] is None:  # Training failed
             logger.error("Leave-one-group-out evaluation failed")
             return
+        # Unpack the result
+        final_model, pooled_metrics, per_group_results = result
+        # Print the pooled metrics as primary
+        print(f"[Leave-One-Group-Out] {args.target} POOLED METRICS (PRIMARY): " + _fmt(pooled_metrics))
+        # Print the per-group results as secondary (mean +/- std across groups)
+        if per_group_results:
+            # We have a list of dicts for each group
+            # We'll compute the mean and std for each metric across groups
+            r2_vals = [m['R2'] for m in per_group_results]
+            rmse_vals = [m['RMSE'] for m in per_group_results]
+            mae_vals = [m['MAE'] for m in per_group_results]
+            mean_r2 = np.mean(r2_vals)
+            std_r2 = np.std(r2_vals)
+            mean_rmse = np.mean(rmse_vals)
+            std_rmse = np.std(rmse_vals)
+            mean_mae = np.mean(mae_vals)
+            std_mae = np.std(mae_vals)
+            print(f"[Leave-One-Group-Out] {args.target} mean +/- std across {len(per_group_results)} groups (SECONDARY, unstable for small groups):")
+            print(f"    R2   : {mean_r2:.4f} +/- {std_r2:.4f}")
+            print(f"    RMSE : {mean_rmse:.4f} +/- {std_rmse:.4f}")
+            print(f"    MAE  : {mean_mae:.4f} +/- {std_mae:.4f}")
     elif args.cv:
         # Regular K-fold CV
         train_kfold(

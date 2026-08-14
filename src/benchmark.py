@@ -1,9 +1,8 @@
 """Fair multi-algorithm benchmark for LNP transfection-efficiency prediction.
 
 Trains and evaluates XGBoost (with early stopping fix), RandomForestRegressor,
-Ridge, SVR, and MLPRegressor on the identical feature matrix, identical CV folds
-(reusing the same KFold(shuffle=True, random_state=42) split indices), and
-identical metrics (R², RMSE, MAE).
+Ridge, SVR, and MLPRegressor on the identical feature matrix, identical buffered
+leave-one-group-out (LOCO) splits, and identical metrics (R², RMSE, MAE).
 
 Outputs a single markdown table suitable for pasting directly into a paper's
 results table.
@@ -13,7 +12,7 @@ from __future__ import annotations
 
 import logging
 import os
-from typing import Tuple
+from typing import Tuple, List
 
 import joblib
 import numpy as np
@@ -21,10 +20,13 @@ import pandas as pd
 from sklearn.ensemble import RandomForestRegressor
 from sklearn.linear_model import Ridge
 from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
-from sklearn.model_selection import KFold
 from sklearn.neural_network import MLPRegressor
 from sklearn.svm import SVR
 from xgboost import XGBRegressor
+from rdkit import Chem, DataStructs
+from rdkit.Chem import rdFingerprintGenerator
+from rdkit.ML.Cluster import Butina
+from train import buffered_leave_one_group_out
 
 logger = logging.getLogger(__name__)
 
@@ -32,6 +34,10 @@ logger = logging.getLogger(__name__)
 FEATURES_PATH = "data/processed/features.csv"
 TARGETS_PATH = "data/processed/targets.csv"
 TARGET_COL = "Transfection"
+
+# Default parameters for buffered splitting
+DEFAULT_DISTANCE_CUTOFF = 0.1
+DEFAULT_MIN_CLUSTER_SIZE = 10
 
 # Model configurations with reasonable default hyperparameters
 # These are chosen as sensible baselines, not optimized
@@ -153,17 +159,37 @@ def main() -> None:
     # Load data
     X, y = load_data()
 
-    # Set up CV folds (same for all models)
-    kf = KFold(n_splits=5, shuffle=True, random_state=42)
+    # Load metadata for SMILES (needed for splitting)
+    meta_path = "data/processed/metadata.csv"
+    if not os.path.isfile(meta_path):
+        raise FileNotFoundError(f"Metadata file missing: {meta_path}")
+    meta = pd.read_csv(meta_path)
+    if "SMILES" not in meta.columns:
+        raise ValueError("Metadata must contain a 'SMILES' column for splitting.")
+    smiles = meta["SMILES"].tolist()
 
-    # Store results for each model
-    results = {name: [] for name in MODELS.keys()}
+    # Compute the buffered leave-one-group-out splits once
+    logger.info("Computing buffered leave-one-group-out splits...")
+    splits = buffered_leave_one_group_out(
+        smiles,
+        fp_radius=2,
+        fp_bits=2048,
+        distance_cutoff=DEFAULT_DISTANCE_CUTOFF,
+        min_cluster_size=DEFAULT_MIN_CLUSTER_SIZE,
+    )
+    logger.info(f"Computed {len(splits)} splits for buffered LOCO.")
 
-    # Evaluate each model using the same CV splits
-    for fold, (train_idx, test_idx) in enumerate(kf.split(X), start=1):
-        logger.info("Processing fold %d/5", fold)
-        X_train, X_test = X[train_idx], X[test_idx]
-        y_train, y_test = y[train_idx], y[test_idx]
+    # Store results for each model: we will collect per-fold metrics and out-of-fold predictions
+    per_fold_metrics = {name: [] for name in MODELS.keys()}
+    # For pooled metrics: collect all out-of-fold predictions and true values
+    all_oof_preds = {name: [] for name in MODELS.keys()}
+    all_oof_true = {name: [] for name in MODELS.keys()}
+
+    # Evaluate each model using the same splits
+    for fold, (train_indices, test_indices) in enumerate(splits, start=1):
+        logger.info(f"Processing fold {fold}/{len(splits)}")
+        X_train, X_test = X[train_indices], X[test_indices]
+        y_train, y_test = y[train_indices], y[test_indices]
 
         for name, model in MODELS.items():
             if name == "XGBoost":
@@ -177,28 +203,45 @@ def main() -> None:
                 model.fit(X_train, y_train)
                 y_pred = model.predict(X_test)
 
-            # Calculate metrics
-            metrics = regression_metrics(y_test, y_pred)
-            results[name].append(metrics)
+            # Calculate metrics for this fold
+            m = regression_metrics(y_test, y_pred)
+            per_fold_metrics[name].append(m)
+
+            # Collect out-of-fold predictions and true values for pooled metrics
+            all_oof_preds[name].extend(y_pred)
+            all_oof_true[name].extend(y_test)
+
             logger.info(
                 "  %s: %s",
                 name,
-                fmt_metrics(metrics),
+                fmt_metrics(m),
             )
 
-    # Aggregate results across folds
-    print("\n## Algorithm Performance Comparison\n")
+    # Aggregate results across folds: compute pooled metrics (primary) and per-fold mean +/- std (secondary)
+    print("\n## Algorithm Performance Comparison (Buffered LOCO)\n")
+    print("### Pooled Metrics (PRIMARY)")
+    print("| Algorithm | Pooled R² | Pooled RMSE | Pooled MAE |")
+    print("|-----------|-----------|-------------|------------|")
+    pooled_results = {}
+    for name in MODELS.keys():
+        # Compute pooled metrics from all out-of-fold predictions and true values
+        pooled_m = regression_metrics(all_oof_true[name], all_oof_preds[name])
+        pooled_results[name] = pooled_m
+        print(
+            f"| {name:<9} | {pooled_m['R2']:.4f} | {pooled_m['RMSE']:.4f} | {pooled_m['MAE']:.4f} |"
+        )
+
+    print("\n### Per-Fold Mean ± Std (SECONDARY, unstable for small groups)")
     print("| Algorithm | Mean R² ± Std | Mean RMSE ± Std | Mean MAE ± Std |")
     print("|-----------|---------------|-----------------|----------------|")
-
     for name in MODELS.keys():
-        fold_results = results[name]
-        mean_r2 = np.mean([r["R2"] for r in fold_results])
-        std_r2 = np.std([r["R2"] for r in fold_results])
-        mean_rmse = np.mean([r["RMSE"] for r in fold_results])
-        std_rmse = np.std([r["RMSE"] for r in fold_results])
-        mean_mae = np.mean([r["MAE"] for r in fold_results])
-        std_mae = np.std([r["MAE"] for r in fold_results])
+        fold_results = per_fold_metrics[name]
+        mean_r2 = np.mean([m["R2"] for m in fold_results])
+        std_r2 = np.std([m["R2"] for m in fold_results])
+        mean_rmse = np.mean([m["RMSE"] for m in fold_results])
+        std_rmse = np.std([m["RMSE"] for m in fold_results])
+        mean_mae = np.mean([m["MAE"] for m in fold_results])
+        std_mae = np.std([m["MAE"] for m in fold_results])
 
         print(
             f"| {name:<9} | {mean_r2:.4f} ± {std_r2:.4f} | {mean_rmse:.4f} ± {std_rmse:.4f} | {mean_mae:.4f} ± {std_mae:.4f} |"
