@@ -72,7 +72,8 @@ def check_applicability_domain(
         "distance_to_nearest_training_compound": distance,
         "nearest_neighbor_smiles": ref_smiles[nn_idx],
         "confidence_note": (
-            "within validated applicability domain" if distance < cutoff
+            f"within validated applicability domain (distance {distance:.3f} < cutoff {cutoff})"
+            if distance < cutoff
             else f"OUTSIDE validated domain (distance {distance:.3f} >= cutoff {cutoff}); "
                  "this model's generalization to compounds this novel has not been "
                  "established, and out-of-distribution evaluation on this library "
