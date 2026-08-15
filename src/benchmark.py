@@ -26,7 +26,7 @@ from xgboost import XGBRegressor
 from rdkit import Chem, DataStructs
 from rdkit.Chem import rdFingerprintGenerator
 from rdkit.ML.Cluster import Butina
-from train import buffered_leave_one_group_out
+from train import buffered_leave_one_group_out, fit_model
 
 logger = logging.getLogger(__name__)
 
@@ -193,10 +193,11 @@ def main() -> None:
 
         for name, model in MODELS.items():
             if name == "XGBoost":
-                # Special handling for XGBoost with early stopping
-                # Create a fresh copy of the model with the same parameters
-                model_copy = XGBRegressor(**model.get_params())
-                fitted_model = train_model_with_early_stopping(model_copy, X_train, y_train)
+                # Use fit_model from train.py
+                # Convert numpy arrays to pandas DataFrame/Series for compatibility
+                X_train_df = pd.DataFrame(X_train)
+                y_train_series = pd.Series(y_train)
+                fitted_model = fit_model(X_train_df, y_train_series)
                 y_pred = fitted_model.predict(X_test)
             else:
                 # Standard fit/predict for other models
