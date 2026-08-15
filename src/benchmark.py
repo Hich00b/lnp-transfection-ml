@@ -26,7 +26,8 @@ from xgboost import XGBRegressor
 from rdkit import Chem, DataStructs
 from rdkit.Chem import rdFingerprintGenerator
 from rdkit.ML.Cluster import Butina
-from train import buffered_leave_one_group_out
+from train import buffered_leave_one_group_out, fit_model
+import pandas as pd
 
 logger = logging.getLogger(__name__)
 
@@ -125,29 +126,6 @@ def fmt_metrics(metrics: dict[str, float]) -> str:
     return f"R²={metrics['R2']:.4f}  RMSE={metrics['RMSE']:.4f}  MAE={metrics['MAE']:.4f}"
 
 
-def train_model_with_early_stopping(
-    model: XGBRegressor, X_train: np.ndarray, y_train: np.ndarray
-) -> XGBRegressor:
-    """Train XGBoost model with early stopping on a validation split."""
-    from sklearn.model_selection import train_test_split
-
-    # Carve out validation set for early stopping
-    X_tr, X_val, y_tr, y_val = train_test_split(
-        X_train, y_train, test_size=0.1, random_state=42, shuffle=True
-    )
-
-    # Set early stopping parameter
-    model.set_params(early_stopping_rounds=EARLY_STOPPING_ROUNDS)
-
-    # Fit with early stopping
-    model.fit(
-        X_tr, y_tr,
-        eval_set=[(X_val, y_val)],
-        verbose=False,
-    )
-
-    return model
-
 
 def main() -> None:
     """Run the benchmark and print results."""
@@ -196,7 +174,10 @@ def main() -> None:
                 # Special handling for XGBoost with early stopping
                 # Create a fresh copy of the model with the same parameters
                 model_copy = XGBRegressor(**model.get_params())
-                fitted_model = train_model_with_early_stopping(model_copy, X_train, y_train)
+                # Convert numpy arrays to pandas DataFrame/Series for fit_model
+                X_train_df = pd.DataFrame(X_train) if isinstance(X_train, np.ndarray) else X_train
+                y_train_series = pd.Series(y_train) if isinstance(y_train, np.ndarray) else y_train
+                fitted_model = fit_model(model_copy, X_train_df, y_train_series)
                 y_pred = fitted_model.predict(X_test)
             else:
                 # Standard fit/predict for other models
