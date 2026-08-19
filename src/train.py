@@ -59,9 +59,9 @@ EARLY_STOPPING_ROUNDS = 50
 INTERNAL_VAL_FRAC = 0.1  # carve an eval set from the training fold for early stop
 
 
-# --------------------------------------------------------------------------- #
+# ------------------- #
 # Data loading
-# --------------------------------------------------------------------------- #
+
 def load_dataset(
     features_path: str,
     targets_path: str,
@@ -94,9 +94,9 @@ def load_dataset(
     return X, y, meta
 
 
-# --------------------------------------------------------------------------- #
+# ---------------------------------------------- #
 # Scaffold splitting
-# --------------------------------------------------------------------------- #
+
 def _murcko_scaffold(smiles: str) -> str:
     """Return the canonical Murcko scaffold SMILES, or "" if unobtainable."""
     mol = Chem.MolFromSmiles(smiles)
@@ -337,7 +337,7 @@ def buffered_leave_one_group_out(
     from rdkit.ML.Cluster import Butina
     from rdkit import DataStructs
 
-    # Generate Morgan fingerprints as RDKit ExplicitBitVect objects (lower-triangular order)
+    # Generate Morgan fingerprints as RDKit ExplicitBitVect objects
     logger.info("Computing Morgan fingerprints for buffered leave-one-group-out (radius=%d, bits=%d)",
                 fp_radius, fp_bits)
     fps = []
@@ -355,7 +355,7 @@ def buffered_leave_one_group_out(
     if not fps:
         raise ValueError("No valid molecules for buffered leave-one-group-out")
 
-    # Compute pairwise Tanimoto distances in lower-triangular order
+    # Compute pairwise Tanimoto distances 
     logger.info("Computing pairwise Tanimoto distances for %d molecules", len(fps))
     distance_matrix = []
     nfps = len(fps)
@@ -461,17 +461,17 @@ def buffered_leave_one_group_out(
     return splits
 
 
-# --------------------------------------------------------------------------- #
+# ------------------------------ #
 # Model helpers
-# --------------------------------------------------------------------------- #
+# ---------------------------- #
 def make_model() -> XGBRegressor:
     """Construct the XGBoost regressor with the project defaults."""
     return XGBRegressor(**XGB_PARAMS)
 
 
-# --------------------------------------------------------------------------- #
+# ----------------------- #
 # Evaluation routines
-# --------------------------------------------------------------------------- #
+# ------------------------------------------------- #
 def train_leave_one_group_out(X, y, meta, models_dir, model_name, target,
                                fp_radius=2, fp_bits=2048, distance_cutoff=0.1,
                                min_cluster_size=10):
@@ -710,9 +710,9 @@ def _save_split(train_idx, test_idx, models_dir) -> None:
                   "test_idx": pd.Series(test_idx)}).to_csv(path, index=False)
 
 
-# --------------------------------------------------------------------------- #
+# -------------------- #
 # CLI
-# --------------------------------------------------------------------------- #
+# --------------- #
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Train an XGBoost transfection-efficiency regressor with scaffold or buffered splitting."

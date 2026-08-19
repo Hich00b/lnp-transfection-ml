@@ -38,9 +38,9 @@ DESCRIPTOR_COLS = ("MolWt", "NumRotatableBonds", "TPSA", "MolLogP")
 MAX_DISPLAY = 25  # top features shown on the global beeswarm
 
 
-# --------------------------------------------------------------------------- #
+# ---------------------------------------- #
 # Plot styling
-# --------------------------------------------------------------------------- #
+
 def style_matplotlib() -> None:
     """Apply publication-quality matplotlib defaults (large fonts, clean axes)."""
     plt.rcParams.update(
@@ -63,9 +63,9 @@ def style_matplotlib() -> None:
     )
 
 
-# --------------------------------------------------------------------------- #
+# ---------------------------------------- #
 # Loading
-# --------------------------------------------------------------------------- #
+
 def load_model(path: str):
     if not os.path.isfile(path):
         raise FileNotFoundError(f"Trained model not found: {path}")
@@ -94,9 +94,9 @@ def load_test_features(
     return X.iloc[present], present
 
 
-# --------------------------------------------------------------------------- #
+# ---------------------------------------- #
 # SHAP plotting
-# --------------------------------------------------------------------------- #
+
 def _beeswarm(shap_values, X, out_path, target_label, max_display=MAX_DISPLAY):
     """Standard SHAP beeswarm summary plot saved at 300 DPI."""
     plt.figure()

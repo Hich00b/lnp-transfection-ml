@@ -32,9 +32,9 @@ from rdkit.Chem import Descriptors, rdFingerprintGenerator
 
 logger = logging.getLogger(__name__)
 
-# --------------------------------------------------------------------------- #
+# ---------------------------------------- #
 # Configuration constants
-# --------------------------------------------------------------------------- #
+
 MORGAN_RADIUS: int = 2
 MORGAN_BITS: int = 2048
 
@@ -57,9 +57,9 @@ TARGETS_FILENAME = "targets.csv"
 METADATA_FILENAME = "metadata.csv"
 
 
-# --------------------------------------------------------------------------- #
+# ---------------------------------------- #
 # SMILES parsing
-# --------------------------------------------------------------------------- #
+
 def smiles_to_mol(smiles: str) -> Optional[Chem.rdchem.Mol]:
     """Parse a SMILES string into a sanitised RDKit ``Mol``.
 
@@ -80,9 +80,9 @@ def smiles_to_mol(smiles: str) -> Optional[Chem.rdchem.Mol]:
     return mol
 
 
-# --------------------------------------------------------------------------- #
+# ---------------------------------------- #
 # Feature computation
-# --------------------------------------------------------------------------- #
+# ---------------------------------------- #
 def compute_morgan_fingerprint(
     mol: Chem.rdchem.Mol,
     radius: int = MORGAN_RADIUS,
@@ -123,9 +123,9 @@ def featurize_mol(mol: Chem.rdchem.Mol) -> dict[str, float]:
     return record
 
 
-# --------------------------------------------------------------------------- #
+# ---------------------------------------- #
 # CSV loading
-# --------------------------------------------------------------------------- #
+
 def load_raw_csv(
     path: str,
     smiles_col: str = "SMILES",
@@ -164,9 +164,9 @@ def _resolve_target_columns(
     return present
 
 
-# --------------------------------------------------------------------------- #
+# ---------------------------------------- #
 # Main processing routine
-# --------------------------------------------------------------------------- #
+
 def process_and_save(
     csv_path: str,
     out_dir: str = "data/processed",
@@ -256,9 +256,9 @@ def process_and_save(
     return paths
 
 
-# --------------------------------------------------------------------------- #
+# ---------------------------------------- #
 # CLI
-# --------------------------------------------------------------------------- #
+
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Featurise a SMILES CSV into Morgan fingerprints + descriptors."
