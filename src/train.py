@@ -644,10 +644,16 @@ def train_scaffold_split(X, y, meta, models_dir, model_name, target, split_metho
     preds = model.predict(X.iloc[test_idx])
     metrics = regression_metrics(y.iloc[test_idx], preds)
     print(f"[{split_method.capitalize()} split] {target} test metrics: " + _fmt(metrics))
+    print(f"[{split_method.capitalize()} split] NOTE: this metric characterizes a single split and is reported "
+          f"for a quick sanity check only; it is not the model that gets deployed.")
 
-    _save_model(model, models_dir, model_name)
+    # Refit on full dataset for deployment, matching the pattern in train_kfold() and train_leave_one_group_out()
+    final = fit_model(X, y)
+    print(f"[{split_method.capitalize()} split] Refit on full dataset ({len(X)} compounds) for deployment.")
+
+    _save_model(final, models_dir, model_name)
     _save_split(train_idx, test_idx, models_dir)
-    return model, metrics
+    return final, metrics
 
 
 def train_kfold(X, y, meta, k, models_dir, model_name, target, split_method="scaffold",

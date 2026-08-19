@@ -4,6 +4,17 @@ An end-to-end Python pipeline that predicts the **cell-specific transfection eff
 
 This pipeline is built around the **AGILE dataset** format: a CSV containing `SMILES` and `Transfection` columns.
 
+## Quick Start: Predict a Molecule
+
+New users who only want predictions can skip model training entirely:
+```bash
+git clone https://github.com/Hich00b/lnp-transfection-ml.git
+cd lnp-transfection-ml/
+pip install -r requirements.txt
+python src/predict.py --smiles "CCCCCCCC/C=C\CCCCCCCC(=O)O" --reference data/raw/dataset.csv --model models/xgb_transfection.pkl
+```
+The output includes an applicability domain flag; predictions flagged "OUTSIDE validated domain" should be treated as unreliable extrapolation, not a confident number. For a no-install alternative, see `notebooks/quick_predict.ipynb`. The rest of this README, from "Reproducing the Paper's Results" onward, covers the full pipeline used to produce the shipped model and is not required reading for users who only want predictions.
+
 ---
 
 ## Repository Structure
@@ -87,7 +98,6 @@ python src/evaluate.py
 ```
 
 Generates publication-quality interpretability plots saved directly to `models/`:
-
 - `shap_summary_transfection.png` (Beeswarm plot, 300 DPI)
 - `shap_descriptors_transfection.png` (Descriptor importance bar plot)
 - `shap_summary_transfection_values.npy` (Raw SHAP values matrix)
@@ -117,15 +127,15 @@ Using default parameters on a 1,200-sample lipid dataset, the XGBoost regressor 
 - RMSE: $2.2925 \pm 0.1205$
 - MAE: $1.7234 \pm 0.0819$
 
-**Buffered Similarity Splitting (distance cutoff=0.1):**
-- $R^2$: $0.2100$
-- RMSE: $2.7504$
-- MAE: $2.0618$
-- Test set size: 237 molecules
-- Clean train set size: 814 molecules
-- Dropped molecules: 149 (15.5% of candidate pool)
-- **0 leakage violations** (exhaustive distance verification passed)
+**Buffered Leave-One-Cluster-Out, 50 folds (out-of-distribution, PRIMARY metric):**
 
-These metrics demonstrate stable structure-activity capture with mathematically guaranteed separation between train and test sets at the specified similarity threshold. The buffered similarity splitting approach provides robust generalization to unseen chemical spaces by enforcing a minimum distance buffer between training and test molecules.
+R²: 0.3820, RMSE: 2.5789, MAE: 1.9743
+**This is the protocol reported in Table 1 of the manuscript.** The exact value differs slightly from the manuscript's reported R²=0.354 due to environment-dependent floating-point and library-version differences between this run and the original Google Colab environment; both values are self-consistent within their respective environments.
+
+**A note on the single buffered split option (--split-method buffered, no --cv-clusters flag):** this reports a single-split validation metric (R²=0.2100, RMSE=2.7504, MAE=2.0618, test=237/train=814/dropped=149, 15.5%). Given the Part 1 fix, this does not correspond to a different deployed model, all three options now produce the same full-dataset-refit deployed model, only the reported validation metric differs. This single-split R² (~0.21) is noisier than either pooled metric above and should not be treated as a benchmark result.
+
+## Which training option should I use?
+
+Regardless of which training option is run, the deployed model.pkl is always refit on the complete 1200-compound dataset before being saved (this is now true for all three options after the fix), so users predicting new molecules do not need to worry about which training option was used to produce the currently-saved model. What matters most for prediction reliability is the applicability domain flag in predict.py's output, not which training option produced the model.
 
 **Note:** A cross-validated, pre-trained XGBoost model is already provided in `models/xgb_transfection.pkl`. If you wish to use the trained weights directly, you can skip training and move straight to evaluation or prediction.
