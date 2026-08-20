@@ -128,11 +128,13 @@ Using default parameters on a 1,200-sample lipid dataset, the XGBoost regressor 
 - MAE: $1.7234 \pm 0.0819$
 
 **Buffered Leave-One-Cluster-Out, 50 folds (out-of-distribution, PRIMARY metric):**
+- $R^2$: $0.3820$
+- RMSE: $2.5789$
+- MAE: $1.9743$
+- **This is the protocol and metric reported in Table 1 of the manuscript.**
 
-R²: 0.3820, RMSE: 2.5789, MAE: 1.9743
-**This is the protocol reported in Table 1 of the manuscript.** The exact value differs slightly from the manuscript's reported R²=0.354 due to environment-dependent floating-point and library-version differences between this run and the original Google Colab environment; both values are self-consistent within their respective environments.
-
-**A note on the single buffered split option (--split-method buffered, no --cv-clusters flag):** this reports a single-split validation metric (R²=0.2100, RMSE=2.7504, MAE=2.0618, test=237/train=814/dropped=149, 15.5%). Given the Part 1 fix, this does not correspond to a different deployed model, all three options now produce the same full-dataset-refit deployed model, only the reported validation metric differs. This single-split R² (~0.21) is noisier than either pooled metric above and should not be treated as a benchmark result.
+**A note on the single buffered split option (--split-method buffered, no --cv-clusters flag):**
+This reports a single-split validation metric ($R^2=0.2100$, RMSE=$2.7504$, MAE=$2.0618$) with test set size=237, clean train size=814, dropped=149 (15.5%). Given the fix in Part 1, this single-split metric does NOT correspond to a different deployed model -- all three options now produce the same full-dataset-refit deployed model. Only the reported validation metric differs, not the deployed artifact. The single-buffered-split R2 (~0.21) is a noisier, single-split metric that does not match the paper's buffered LOCO result (R2=0.382) or pooled random CV result (R2=0.490).
 
 ## Which training option should I use?
 

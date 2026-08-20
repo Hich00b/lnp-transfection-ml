@@ -75,22 +75,53 @@ def load_model(path: str):
 
 
 def load_test_features(
-    features_path: str, split_path: str
+    features_path: str, split_path: str, strict: bool = False
 ) -> tuple[pd.DataFrame, list[int]]:
     """Return the held-out test feature matrix (+ the test row indices)."""
     if not os.path.isfile(features_path):
         raise FileNotFoundError(f"Features file not found: {features_path}")
     X = pd.read_csv(features_path).select_dtypes(include=[np.number])
     test_idx: list[int] = list(range(len(X)))  # default: evaluate on everything
+    used_full = False
     if os.path.isfile(split_path):
         split = pd.read_csv(split_path)
-        if "test_idx" in split.columns:
+        if "test_idx" not in split.columns:
+            print(
+                f"WARN: Split file {split_path} exists but lacks a 'test_idx' column. "
+                "Evaluating SHAP on the full dataset (all samples).",
+                flush=True,
+            )
+            used_full = True
+        else:
             vals = split["test_idx"].dropna().astype(int).tolist()
-            if vals:
+            if not vals:
+                print(
+                    f"WARN: Split file {split_path} has an empty 'test_idx' column. "
+                    "This occurs after LOCO training (--cv-clusters) because there is no single held-out test set. "
+                    "To obtain genuine held-out SHAP values, first run train.py with "
+                    "--split-method buffered (or the default scaffold split) to create a real held-out set, "
+                    "then immediately run evaluate.py before any other training command. "
+                    "Evaluating SHAP on the full dataset (all samples) as a fallback.",
+                    flush=True,
+                )
+                used_full = True
+            else:
                 test_idx = vals
+    else:
+        print(
+            f"WARN: Split file {split_path} not found. "
+            "Evaluating SHAP on the full dataset (all samples).",
+            flush=True,
+        )
+        used_full = True
     present = [i for i in test_idx if 0 <= i < len(X)]
     if len(present) != len(test_idx):
         logger.warning("Some test indices out of range; clamped to %d rows.", len(present))
+    if strict and used_full:
+        raise RuntimeError(
+            "No held-out test set available for SHAP analysis. "
+            "Run with --strict to require a genuine held-out set, or provide a valid split file with non-empty test_idx."
+        )
     return X.iloc[present], present
 
 
@@ -153,11 +184,12 @@ def run_shap_analysis(
     out_path: str = DEFAULT_OUT,
     out_desc_path: str = DEFAULT_OUT_DESC,
     target: str = DEFAULT_TARGET,
+    strict: bool = False,
 ) -> None:
     """Compute SHAP values with a TreeExplainer and save the summary plots."""
     style_matplotlib()
     model = load_model(model_path)
-    X_test, _ = load_test_features(features_path, split_path)
+    X_test, _ = load_test_features(features_path, split_path, strict=strict)
     if len(X_test) == 0:
         raise RuntimeError("No test samples available for SHAP analysis.")
 
@@ -188,6 +220,11 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--out-desc", default=DEFAULT_OUT_DESC)
     parser.add_argument("--target", default=DEFAULT_TARGET,
                         help="Target label used in plot titles (default: Transfection).")
+    parser.add_argument(
+        "--strict",
+        action="store_true",
+        help="Raise an error if no genuine held-out test set is available (instead of evaluating on the full dataset with a warning).",
+    )
     return parser
 
 
@@ -204,6 +241,7 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
         out_path=args.out,
         out_desc_path=args.out_desc,
         target=args.target,
+        strict=args.strict,
     )
 
 
